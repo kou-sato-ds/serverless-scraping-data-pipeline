@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss xmlns:media="http://search.yahoo.com/mrss/" version="2.0">
+  <channel>
+    <generator>NFE/5.0</generator>
+    <title>テストニュース - Google ニュース</title>
+    <link>https://news.google.com/?hl=ja&amp;gl=JP&amp;ceid=JP:ja</link>
+    <language>ja</language>
+    <webMaster>news-webmaster@google.com</webMaster>
+    <copyright>Copyright 2026</copyright>
+    <lastBuildDate>Fri, 08 May 2026 12:00:00 GMT</lastBuildDate>
+
+    <item>
+      <title>日経平均、3万円台を回復　半導体株が牽引</title>
+      <link>https://news.google.com/rss/articles/CBMi_test_article_1?oc=5</link>
+      <guid isPermaLink="false">CBMi_test_article_1</guid>
+      <pubDate>Fri, 08 May 2026 11:30:00 GMT</pubDate>
+      <description>日経平均の動向に関する記事です。</description>
+      <source url="https://www.nikkei.com">日本経済新聞</source>
+    </item>
+
+    <item>
+      <title>関東地方　午後から雷雨の可能性</title>
+      <link>https://news.google.com/rss/articles/CBMi_test_article_2?oc=5</link>
+      <guid isPermaLink="false">CBMi_test_article_2</guid>
+      <pubDate>Fri, 08 May 2026 10:00:00 GMT</pubDate>
+      <description>関東地方の天気予報。</description>
+      <source url="https://tenki.jp">tenki.jp</source>
+    </item>
+
+    <item>
+      <title>　空白だらけ　　タイトル　　例\n改行も含む</title>
+      <link>https://news.google.com/rss/articles/CBMi_test_article_3?oc=5</link>
+      <guid isPermaLink="false">CBMi_test_article_3</guid>
+      <pubDate>Fri, 08 May 2026 09:00:00 GMT</pubDate>
+      <description>クレンジング動作確認用。</description>
+      <source url="https://example.com">サンプルメディア</source>
+    </item>
+
+    <!-- 重複リンクのテスト用 (article_1 と同じ link) -->
+    <item>
+      <title>日経平均、3万円台を回復　半導体株が牽引 (重複)</title>
+      <link>https://news.google.com/rss/articles/CBMi_test_article_1?oc=5</link>
+      <guid isPermaLink="false">CBMi_test_article_1_dup</guid>
+      <pubDate>Fri, 08 May 2026 11:35:00 GMT</pubDate>
+      <source url="https://www.nikkei.com">日本経済新聞</source>
+    </item>
+
+    <!-- title 欠損のテスト用 -->
+    <item>
+      <link>https://news.google.com/rss/articles/CBMi_test_article_4?oc=5</link>
+      <guid isPermaLink="false">CBMi_test_article_4</guid>
+      <pubDate>Fri, 08 May 2026 08:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>

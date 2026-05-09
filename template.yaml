@@ -1,0 +1,116 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  CloudPro Demo: Google News RSS Collector.
+  Lightweight ZIP-based Lambda (Python 3.12 / arm64) that replaces the
+  Playwright Container Image variant. Triggers hourly via EventBridge,
+  stores cleansed JSON to S3 with Hive-compatible partitioning for
+  downstream Athena/Glue analytics.
+
+# =====================================================================
+# Parameters
+# =====================================================================
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cloudpro-news-rss
+    Description: プロジェクト識別子 (リソース名のプレフィックス)
+  ScheduleExpression:
+    Type: String
+    Default: rate(1 hour)
+    Description: EventBridge スケジュール式
+  RssUrl:
+    Type: String
+    Default: https://news.google.com/rss?hl=ja&gl=JP&ceid=JP:ja
+    Description: 取得対象の RSS フィード URL
+
+# =====================================================================
+# Globals
+# =====================================================================
+Globals:
+  Function:
+    Runtime: python3.12
+    # RSS なら 30秒で十分 (Playwright版は 300秒だった)
+    Timeout: 30
+    # 256MB で十分 (Playwright版は 2048MB だった)
+    MemorySize: 256
+    # Graviton2 は x86_64 比 約20% 安価。RSS パースは ARM でも問題なし。
+    Architectures:
+      - arm64
+
+# =====================================================================
+# Resources
+# =====================================================================
+Resources:
+
+  # -------------------------------------------------------------------
+  # S3 Bucket (Playwright版と同等のセキュリティ設定)
+  # -------------------------------------------------------------------
+  NewsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-${AWS::AccountId}-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldData
+            Status: Enabled
+            ExpirationInDays: 90
+
+  # -------------------------------------------------------------------
+  # Lambda Function (ZIP)
+  #   - PackageType: Zip がデフォルト (明示しない)
+  #   - CodeUri: src/ → SAM が自動でパッケージング
+  #   - requirements.txt が同階層にあれば pip 自動解決
+  # -------------------------------------------------------------------
+  RssCollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-function"
+      CodeUri: src/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref NewsBucket
+          S3_PREFIX: google-news-rss
+          RSS_URL: !Ref RssUrl
+          MAX_ARTICLES: "100"
+      Policies:
+        - Statement:
+            - Sid: AllowPutObjectToNewsBucket
+              Effect: Allow
+              Action:
+                - s3:PutObject
+              Resource: !Sub "${NewsBucket.Arn}/*"
+      Events:
+        HourlySchedule:
+          Type: Schedule
+          Properties:
+            Name: !Sub "${ProjectName}-hourly-trigger"
+            Description: Trigger the RSS collector every hour.
+            Schedule: !Ref ScheduleExpression
+            Enabled: true
+
+# =====================================================================
+# Outputs
+# =====================================================================
+Outputs:
+  BucketName:
+    Description: RSS から取得した JSON が格納される S3 バケット
+    Value: !Ref NewsBucket
+    Export:
+      Name: !Sub "${ProjectName}-bucket-name"
+  BucketArn:
+    Value: !GetAtt NewsBucket.Arn
+  FunctionArn:
+    Value: !GetAtt RssCollectorFunction.Arn
+  FunctionName:
+    Value: !Ref RssCollectorFunction

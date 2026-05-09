@@ -1,0 +1,412 @@
+<!-- ============================================================ -->
+<!-- CloudPro Demo: Serverless News Scraper                        -->
+<!-- README for GitHub public repository                           -->
+<!-- ============================================================ -->
+
+# Serverless News Scraper on AWS Lambda
+
+> **AWS SAM + Playwright (Lambda Container Image) + S3 + EventBridge** で構築する、
+> 1時間ごとに自動実行される完全マネージドのスクレイピング基盤です。
+>
+> 本リポジトリは「**実装力を証明するためのデモアプリケーション**」として設計しており、
+> 単なる動作確認ではなく、**本番運用で必要となる設計判断 (依存ライブラリの安定化、最小権限 IAM、構造化ストレージ、インフラ as Code)** を一つのプロジェクトに集約しています。
+
+---
+
+## このリポジトリで示している実装力 (TL;DR)
+
+| 観点 | 採用した解 | 解決した課題 |
+|---|---|---|
+| **デプロイサイズ** | Lambda **Container Image** 方式 (最大 10GB) | Playwright + Chromium (約 700MB) を ZIP の 250MB 制限内に収められない問題 |
+| **依存ライブラリの安定性** | Dockerfile で OS 依存を完全固定 | Lambda 標準ランタイム上での glibc / libnss3 不足によるブラウザ起動失敗 |
+| **インフラ as Code** | AWS SAM (template.yaml) | コンソール作業ゼロ。stack 単位で完全な再現性を担保 |
+| **セキュリティ** | IAM **最小権限** (PutObject only) + S3 完全プライベート + SSE-S3 | "とりあえず S3 FullAccess" に逃げない設計 |
+| **運用性** | EventBridge スケジュール / 構造化ログ / 90 日ライフサイクル | 放置しても暴走・コスト膨張しない |
+| **テスタビリティ** | `sam local invoke` でコンテナ実行を本番と同条件で再現 | "ローカルで動いたが Lambda で動かない" を排除 |
+
+---
+
+## アーキテクチャ概要
+
+Google News から記事を1時間ごとに収集し、クレンジング後 JSON として S3 に蓄積する
+シンプルなデータパイプラインです。Playwright を Lambda コンテナイメージ方式で動かす
+ことで、ヘッドレスブラウザが必要なサイトに対しても安定して動作します。
+
+### データパイプライン図
+
+```mermaid
+flowchart LR
+    subgraph COLLECT["収集 (Collect)"]
+        EB[EventBridge<br/>rate&#40;1 hour&#41;]
+        LF[Lambda Function<br/>Container Image<br/>Python 3.9 + Playwright]
+        GN[Google News<br/>news.google.com]
+        EB -->|trigger| LF
+        LF -->|HTTP GET<br/>via Chromium| GN
+        GN -.->|HTML| LF
+    end
+
+    subgraph TRANSFORM["加工 (Transform)"]
+        CL[cleanse_text&#40;&#41;<br/>空白・改行・制御文字を除去]
+        JS[JSON シリアライズ<br/>UTF-8]
+        LF --> CL --> JS
+    end
+
+    subgraph STORE["蓄積 (Store)"]
+        S3[(S3 Bucket<br/>SSE-S3 暗号化<br/>90日ライフサイクル)]
+        JS -->|PutObject<br/>Content-Type: application/json| S3
+    end
+
+    style COLLECT fill:#E3F2FD,stroke:#1976D2
+    style TRANSFORM fill:#FFF3E0,stroke:#F57C00
+    style STORE fill:#E8F5E9,stroke:#388E3C
+```
+
+---
+
+## なぜ「Docker イメージ方式」を採用したのか
+
+AWS Lambda には大きく **ZIP 方式** と **Container Image 方式** の2つのデプロイ形態があります。
+本プロジェクトでは、以下の技術的理由から **Container Image 方式を意図的に選択** しています。
+
+### 1. Lambda の容量制限を回避できる
+
+| 項目 | ZIP 方式 | Container Image 方式 |
+|---|---|---|
+| デプロイパッケージ最大サイズ | **250 MB** (展開後) | **10 GB** |
+| Playwright + Chromium のサイズ | 約 700 MB | 余裕で収まる |
+
+Playwright の Chromium バイナリは単体で約 450 MB、Python ライブラリと依存物を合わせると 700MB 近くなり、
+**ZIP 方式では物理的にデプロイ不可能** です。Container Image 方式は 10GB まで許容されるため、
+Playwright や Headless Chrome、ML モデルといった「重い依存」を Lambda に持ち込む際の事実上唯一の選択肢になります。
+
+### 2. OS レベルの依存ライブラリを完全に固定できる
+
+Chromium は `libnss3` `libatk1.0-0` `libcups2` をはじめとする 20 以上の共有ライブラリに依存しています。
+Lambda の標準ランタイムは Amazon Linux ベースで、これらのライブラリのバージョンや有無が
+時期によって変動するため、**ZIP 方式ではブラウザ起動が突然失敗するリスクが残ります**。
+
+Container Image 方式なら、Dockerfile に `apt-get install` を明示することで、
+ローカル・CI・本番すべてで **完全に同一の OS 環境** を再現できます。
+これは「ローカルで動いたが Lambda で動かない」を構造的に排除する設計です。
+
+### 3. 既存の Docker エコシステムを活かせる
+
+イメージは ECR にホストされ、ローカルでは `docker run` で動作確認できます。
+SAM の `sam local invoke` も内部的にこのイメージをそのまま起動するため、
+ローカル検証と本番動作のギャップがほぼゼロになります。
+
+---
+
+## ディレクトリ構成
+
+```
+.
+├── src/
+│   └── app.py                    # Lambda ハンドラ (収集・加工・蓄積)
+├── events/
+│   └── scheduled-event.json      # ローカルテスト用イベント
+├── env.example.json              # ローカルテスト用 環境変数テンプレート
+├── Dockerfile                    # Lambda コンテナイメージ定義
+├── requirements.txt              # Python 依存パッケージ
+├── template.yaml                 # AWS SAM テンプレート
+└── README.md
+```
+
+---
+
+## 前提条件
+
+| ツール | バージョン | 用途 |
+|---|---|---|
+| AWS CLI | v2.x | 認証情報設定・S3 確認 |
+| AWS SAM CLI | v1.100+ | ビルド・ローカル実行・デプロイ |
+| Docker | 20.x+ (起動済み) | イメージビルド・Lambda エミュレート |
+| Python | 3.9+ | ローカル静的解析用 (任意) |
+| AWS アカウント | — | ECR への push 権限を持つ IAM ユーザー |
+
+```bash
+# バージョン確認
+aws --version
+sam --version
+docker --version
+```
+
+---
+
+## ローカルテスト手順
+
+`sam local invoke` は本番と同じ Container Image を Docker で起動するため、
+**Lambda 本番環境とほぼ同一の条件でスクレイピングから S3 アップロードまでを検証** できます。
+
+### Step 1: コンテナイメージのビルド
+
+```bash
+sam build
+```
+
+`Metadata.Dockerfile` の指定に従って Docker イメージがビルドされます (初回は 5〜10 分程度)。
+ビルド成果物は `.aws-sam/build/` 配下に配置されます。
+
+### Step 2: テスト用 S3 バケットの準備
+
+ローカル実行でも S3 への PUT を検証するため、**開発用バケット** を作成しておきます。
+(既存の検証用バケットがあれば再利用可)
+
+```bash
+# 一意なバケット名を作成 (例)
+export DEV_BUCKET="cloudpro-news-scraper-dev-$(date +%s)"
+aws s3 mb "s3://${DEV_BUCKET}" --region ap-northeast-1
+```
+
+### Step 3: 環境変数ファイルの準備
+
+`env.example.json` をコピーして、`S3_BUCKET` を上記バケット名に書き換えます。
+
+```bash
+cp env.example.json env.json
+# エディタで env.json を開き、S3_BUCKET の値を ${DEV_BUCKET} の値に置き換える
+```
+
+```jsonc
+// env.json (例)
+{
+  "ScraperFunction": {
+    "S3_BUCKET": "cloudpro-news-scraper-dev-1715000000",
+    "TARGET_URL": "https://news.google.com",
+    "MAX_ARTICLES": "5",
+    "S3_PREFIX": "google-news-local"
+  }
+}
+```
+
+> **Note**: `env.json` は実バケット名を含むため、`.gitignore` に追加してコミット対象から除外することを推奨します。
+
+### Step 4: ローカル実行
+
+```bash
+sam local invoke ScraperFunction \
+  -e events/scheduled-event.json \
+  --env-vars env.json
+```
+
+`sam local invoke` は AWS 認証情報を `~/.aws/credentials` から自動的にコンテナへ引き渡すため、
+S3 への PutObject はそのまま開発用バケットに反映されます。
+
+成功時の出力例 (抜粋):
+
+```
+[INFO] Scraping start: target=https://news.google.com, max=5
+[INFO] Extracted 5 articles after cleansing.
+[INFO] Uploaded to s3://cloudpro-news-scraper-dev-.../google-news-local/2026/05/08/091245.json
+{
+  "statusCode": 200,
+  "body": "{\"message\":\"Successfully scraped and uploaded.\",\"count\":5,...}"
+}
+```
+
+### Step 5: 結果の確認
+
+```bash
+# 直近のオブジェクトを一覧
+aws s3 ls "s3://${DEV_BUCKET}/google-news-local/" --recursive
+
+# 中身を取得して整形表示
+aws s3 cp "s3://${DEV_BUCKET}/google-news-local/2026/05/08/091245.json" - | jq .
+```
+
+---
+
+## 本番デプロイ手順
+
+### Step 1: ガイド付きデプロイ (初回)
+
+```bash
+sam deploy --guided
+```
+
+対話プロンプトでは以下のように回答します:
+
+```text
+Stack Name [sam-app]: cloudpro-news-scraper
+AWS Region [us-east-1]: ap-northeast-1
+Parameter ProjectName [cloudpro-news-scraper]: <Enter で確定>
+Parameter ScheduleExpression [rate(1 hour)]: <Enter で確定>
+Confirm changes before deploy [y/N]: y
+Allow SAM CLI IAM role creation [Y/n]: Y
+Disable rollback [y/N]: N
+Save arguments to configuration file [Y/n]: Y
+SAM configuration file [samconfig.toml]: <Enter で確定>
+SAM configuration environment [default]: <Enter で確定>
+```
+
+#### ECR リポジトリ作成時の注意点
+
+Container Image 方式では、ビルドしたイメージを **ECR (Elastic Container Registry)** に push する必要があります。
+`sam deploy --guided` の途中で以下のプロンプトが表示されます:
+
+```text
+Image Repositories for ScraperFunction
+  Found 0 ECR repositories for ScraperFunction.
+Create managed ECR repositories for all functions? [Y/n]:
+```
+
+| 選択 | 動作 |
+|---|---|
+| **Y (推奨・初回)** | SAM が自動で ECR リポジトリを作成し、ライフサイクルポリシーも適切に設定する |
+| **n** | 既存 ECR リポジトリの URI を手動指定する (CI/CD で事前作成済みの場合) |
+
+> **重要**: 自動作成された ECR リポジトリは `sam delete` 時にも削除対象に含まれます。
+> CI/CD で別管理する場合は `n` を選択し、`samconfig.toml` の `image_repositories` に URI を明記してください。
+> また、ECR リポジトリ名はリージョン内で一意である必要があるため、複数環境にデプロイする際は
+> Stack Name を環境ごとに変える (`-dev`, `-stg`, `-prod` 等) ことで衝突を回避できます。
+
+設定は `samconfig.toml` に保存され、2回目以降は `sam deploy` 単体で再デプロイ可能です。
+
+### Step 2: デプロイ完了の確認
+
+```bash
+# CloudFormation の Outputs を表示
+aws cloudformation describe-stacks \
+  --stack-name cloudpro-news-scraper \
+  --query "Stacks[0].Outputs" \
+  --output table
+```
+
+`BucketName` `FunctionArn` などが取得できれば成功です。
+
+### Step 3: 動作確認 (手動トリガー)
+
+EventBridge の初回実行を待たず、直接 Lambda を叩いて確認します:
+
+```bash
+aws lambda invoke \
+  --function-name cloudpro-news-scraper-function \
+  --payload '{}' \
+  --cli-binary-format raw-in-base64-out \
+  /tmp/response.json
+
+cat /tmp/response.json | jq .
+```
+
+### Step 4: ログ追跡
+
+```bash
+sam logs -n ScraperFunction --stack-name cloudpro-news-scraper --tail
+```
+
+---
+
+## 実行結果のサンプル
+
+### S3 オブジェクトキー構造
+
+時系列パーティションで保存されるため、後段の Athena / Glue 連携も容易です。
+
+```
+s3://cloudpro-news-scraper-<account-id>-ap-northeast-1/
+└── google-news/
+    ├── 2026/
+    │   ├── 05/
+    │   │   ├── 08/
+    │   │   │   ├── 090012.json   ← 09:00 実行
+    │   │   │   ├── 100015.json   ← 10:00 実行
+    │   │   │   └── 110011.json   ← 11:00 実行
+    │   │   └── 09/
+    │   │       └── ...
+    │   └── 06/
+    │       └── ...
+```
+
+### 出力 JSON 構造
+
+```json
+{
+  "fetched_at": "2026-05-08T09:00:12.345678+00:00",
+  "source": "https://news.google.com",
+  "count": 30,
+  "articles": [
+    {
+      "title": "サンプルニュースタイトル",
+      "link": "https://news.google.com/articles/CBMiSGh0dHBzOi8v..."
+    },
+    {
+      "title": "別のニュース見出し",
+      "link": "https://news.google.com/articles/CBMiP2h0dHBzOi8v..."
+    }
+  ]
+}
+```
+
+### 実行結果のキャプチャ (プレースホルダー)
+
+> 以下は実環境にデプロイ後のスクリーンショットを差し替える場所です。
+> 採用担当者・クライアントへの提出時には、実画面のキャプチャに置き換えてください。
+
+| キャプチャ箇所 | 想定画像 | 配置先 |
+|---|---|---|
+| ① CloudFormation スタック作成完了 | スタック一覧で `CREATE_COMPLETE` が表示されている画面 | `docs/screenshots/01-cfn-stack.png` |
+| ② Lambda 関数の実行ログ | CloudWatch Logs で "Successfully scraped and uploaded" が確認できる画面 | `docs/screenshots/02-cloudwatch-logs.png` |
+| ③ S3 バケットのオブジェクト一覧 | `google-news/YYYY/MM/DD/` 配下に JSON が時系列で並んでいる画面 | `docs/screenshots/03-s3-objects.png` |
+| ④ JSON ファイルの中身 | S3 オブジェクトのプレビューで `articles` 配列が表示されている画面 | `docs/screenshots/04-json-preview.png` |
+
+差し替え用の Markdown 例:
+
+```markdown
+![CloudFormation Stack](docs/screenshots/01-cfn-stack.png)
+![CloudWatch Logs](docs/screenshots/02-cloudwatch-logs.png)
+![S3 Objects](docs/screenshots/03-s3-objects.png)
+![JSON Preview](docs/screenshots/04-json-preview.png)
+```
+
+---
+
+## 実装の見どころ (コードレビュー観点)
+
+### `src/app.py`
+
+- **コールドスタート最適化**: `boto3.client("s3")` をモジュールトップで生成し、ハンドラ実行ごとの再初期化コストを排除。
+- **データクレンジング**: `cleanse_text()` で全角スペース (U+3000)・タブ・制御文字 (`\x00-\x1f`, `\x7f`) を漏れなく除去。
+- **重複排除**: `set` による URL ベースの重複排除で、同一記事の二重保存を防止。
+- **Lambda 向け Chromium 起動オプション**: `--no-sandbox` `--disable-dev-shm-usage` `--single-process` で Lambda の `/dev/shm` 制限と読み取り専用ファイルシステムに対応。
+
+### `template.yaml`
+
+- **最小権限 IAM**: `Resource: !Sub "${NewsBucket.Arn}/*"` で、当該バケット配下のみに権限を限定。
+- **暗号化必須**: `BucketEncryption` を必須化し、暗号化されていない PUT を構造的に防止。
+- **コスト管理**: 90 日ライフサイクルでデモ運用時の S3 コスト膨張を予防。
+
+### `Dockerfile`
+
+- **層キャッシュの最適化**: `requirements.txt` を先に COPY することで、コード変更時の再ビルド時間を短縮。
+- **ブラウザの限定インストール**: `playwright install chromium` のみ実行し、Firefox/WebKit を省いてイメージサイズを削減。
+- **`PLAYWRIGHT_BROWSERS_PATH` の明示**: Lambda の `/tmp` 以外が読み取り専用である制約に対応。
+
+---
+
+## クリーンアップ手順
+
+```bash
+# 1. S3 バケット内のオブジェクトを空にする
+#    (CloudFormation は空でないバケットを削除できないため、先に手動削除)
+aws s3 rm "s3://cloudpro-news-scraper-$(aws sts get-caller-identity --query Account --output text)-ap-northeast-1" --recursive
+
+# 2. SAM スタックを削除 (Lambda / IAM / EventBridge / S3 を一括削除)
+sam delete --stack-name cloudpro-news-scraper
+```
+
+> **注意**: ECR リポジトリ内の古いイメージは、ECR ライフサイクルポリシーまたは手動削除でクリーンアップしてください。
+
+---
+
+## 参考資料
+
+- [Playwright on Docker (Python 公式)](https://playwright.dev/python/docs/docker) — Chromium 実行に必要な OS 依存ライブラリの一覧
+- [AWS SAM `AWS::Serverless::Function` (Image type)](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-resource-function.html#sam-function-imageconfig) — Container Image 方式の SAM リソース定義仕様
+- [AWS Lambda Runtime Interface Client (awslambdaric)](https://github.com/aws/aws-lambda-python-runtime-interface-client) — 任意のベースイメージを Lambda 化する公式 RIC
+- [AWS Lambda Container Image Support](https://docs.aws.amazon.com/lambda/latest/dg/images-create.html) — 10GB 制限などの公式仕様
+
+---
+
+## ライセンス
+
+MIT License (本リポジトリは学習・ポートフォリオ用途を想定しています)
