@@ -1,11 +1,9 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  CloudPro Demo: Google News RSS Collector.
-  Lightweight ZIP-based Lambda (Python 3.12 / arm64) that replaces the
-  Playwright Container Image variant. Triggers hourly via EventBridge,
-  stores cleansed JSON to S3 with Hive-compatible partitioning for
-  downstream Athena/Glue analytics.
+  Serverless News RSS Collector + Athena Analytics Layer.
+  Lambda fetches Google News RSS hourly to S3 (Hive-partitioned),
+  Glue Crawler discovers partitions, Athena enables SQL analytics.
 
 # =====================================================================
 # Parameters
@@ -14,15 +12,16 @@ Parameters:
   ProjectName:
     Type: String
     Default: cloudpro-news-rss
-    Description: プロジェクト識別子 (リソース名のプレフィックス)
   ScheduleExpression:
     Type: String
     Default: rate(1 hour)
-    Description: EventBridge スケジュール式
   RssUrl:
     Type: String
     Default: https://news.google.com/rss?hl=ja&gl=JP&ceid=JP:ja
-    Description: 取得対象の RSS フィード URL
+  S3DataPrefix:
+    Type: String
+    Default: google-news-rss
+    Description: S3 prefix where Lambda writes JSON (Crawler scans this path)
 
 # =====================================================================
 # Globals
@@ -30,11 +29,8 @@ Parameters:
 Globals:
   Function:
     Runtime: python3.12
-    # RSS なら 30秒で十分 (Playwright版は 300秒だった)
     Timeout: 30
-    # 256MB で十分 (Playwright版は 2048MB だった)
     MemorySize: 256
-    # Graviton2 は x86_64 比 約20% 安価。RSS パースは ARM でも問題なし。
     Architectures:
       - arm64
 
@@ -44,7 +40,7 @@ Globals:
 Resources:
 
   # -------------------------------------------------------------------
-  # S3 Bucket (Playwright版と同等のセキュリティ設定)
+  # S3 Bucket (Lambda 出力先 + Athena 結果保存先)
   # -------------------------------------------------------------------
   NewsBucket:
     Type: AWS::S3::Bucket
@@ -64,12 +60,13 @@ Resources:
           - Id: ExpireOldData
             Status: Enabled
             ExpirationInDays: 90
+          - Id: ExpireAthenaResults
+            Status: Enabled
+            Prefix: athena-results/
+            ExpirationInDays: 7
 
   # -------------------------------------------------------------------
-  # Lambda Function (ZIP)
-  #   - PackageType: Zip がデフォルト (明示しない)
-  #   - CodeUri: src/ → SAM が自動でパッケージング
-  #   - requirements.txt が同階層にあれば pip 自動解決
+  # Lambda Function (RSS Collector)
   # -------------------------------------------------------------------
   RssCollectorFunction:
     Type: AWS::Serverless::Function
@@ -80,7 +77,7 @@ Resources:
       Environment:
         Variables:
           S3_BUCKET: !Ref NewsBucket
-          S3_PREFIX: google-news-rss
+          S3_PREFIX: !Ref S3DataPrefix
           RSS_URL: !Ref RssUrl
           MAX_ARTICLES: "100"
       Policies:
@@ -89,22 +86,116 @@ Resources:
               Effect: Allow
               Action:
                 - s3:PutObject
-              Resource: !Sub "${NewsBucket.Arn}/*"
+              Resource: !Sub "${NewsBucket.Arn}/${S3DataPrefix}/*"
       Events:
         HourlySchedule:
           Type: Schedule
           Properties:
             Name: !Sub "${ProjectName}-hourly-trigger"
-            Description: Trigger the RSS collector every hour.
             Schedule: !Ref ScheduleExpression
             Enabled: true
+
+  # ===================================================================
+  # Analytics Layer: Glue + Athena
+  # ===================================================================
+
+  # -------------------------------------------------------------------
+  # Glue Database (テーブルを束ねる論理コンテナ)
+  # -------------------------------------------------------------------
+  NewsGlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub "${ProjectName}_db"
+        Description: Catalog for Google News RSS collected data
+
+  # -------------------------------------------------------------------
+  # IAM Role for Glue Crawler
+  #   - 最小権限: 対象バケットの read のみ (他バケット触れない)
+  # -------------------------------------------------------------------
+  GlueCrawlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-crawler-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Glue サービス標準権限 (Glue Catalog write 等)
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: ReadNewsBucketOnly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadDataPrefix
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt NewsBucket.Arn
+                  - !Sub "${NewsBucket.Arn}/${S3DataPrefix}/*"
+
+  # -------------------------------------------------------------------
+  # Glue Crawler (Hive パーティションの自動認識)
+  #   - Schedule なし: ON_DEMAND (デプロイ後に手動で start)
+  #   - CRAWL_NEW_FOLDERS_ONLY: 既存パーティションは再スキャンせず軽量
+  # -------------------------------------------------------------------
+  NewsCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub "${ProjectName}-crawler"
+      Role: !GetAtt GlueCrawlerRole.Arn
+      DatabaseName: !Ref NewsGlueDatabase
+      Description: Discovers Hive-partitioned JSON in S3 and registers as Athena tables
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${NewsBucket}/${S3DataPrefix}/"
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+      RecrawlPolicy:
+        RecrawlBehavior: CRAWL_NEW_FOLDERS_ONLY
+      Configuration: |
+        {
+          "Version": 1.0,
+          "Grouping": {
+            "TableGroupingPolicy": "CombineCompatibleSchemas"
+          },
+          "CrawlerOutput": {
+            "Partitions": { "AddOrUpdateBehavior": "InheritFromTable" }
+          }
+        }
+
+  # -------------------------------------------------------------------
+  # Athena WorkGroup (クエリ結果を集約管理)
+  # -------------------------------------------------------------------
+  NewsAthenaWorkgroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub "${ProjectName}-workgroup"
+      State: ENABLED
+      Description: Workgroup for analyzing Google News RSS data
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${NewsBucket}/athena-results/"
+          EncryptionConfiguration:
+            EncryptionOption: SSE_S3
 
 # =====================================================================
 # Outputs
 # =====================================================================
 Outputs:
   BucketName:
-    Description: RSS から取得した JSON が格納される S3 バケット
+    Description: S3 bucket containing RSS-derived JSON
     Value: !Ref NewsBucket
     Export:
       Name: !Sub "${ProjectName}-bucket-name"
@@ -114,3 +205,12 @@ Outputs:
     Value: !GetAtt RssCollectorFunction.Arn
   FunctionName:
     Value: !Ref RssCollectorFunction
+  GlueDatabaseName:
+    Description: Glue database name (use in Athena)
+    Value: !Ref NewsGlueDatabase
+  CrawlerName:
+    Description: Glue crawler name (run manually with `aws glue start-crawler`)
+    Value: !Ref NewsCrawler
+  AthenaWorkgroupName:
+    Description: Athena workgroup for SQL analytics
+    Value: !Ref NewsAthenaWorkgroup
