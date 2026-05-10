@@ -264,11 +264,40 @@ sam delete --stack-name cloudpro-news-rss
 
 ---
 
+## 🔍 分析層 (Athena / Glue) — IaC 設計済み
+
+`template.yaml` には以下の分析層リソースが定義されています (デプロイは次フェーズで実施予定):
+
+| リソース | 役割 |
+|---|---|
+| **Glue Database** (`{project}_db`) | テーブルカタログのコンテナ |
+| **Glue Crawler** | S3 の Hive パーティションを自動検出してテーブル化 (ON_DEMAND) |
+| **Athena WorkGroup** | クエリ実行とコスト・監査の単位、結果は SSE-S3 暗号化 |
+| **Crawler IAM Role** | 対象バケット配下のみ `s3:GetObject` 可の最小権限 |
+
+設計上のポイント:
+
+- `RecrawlBehavior: CRAWL_NEW_FOLDERS_ONLY` で既存パーティション再スキャン回避
+- `SchemaChangePolicy: UPDATE_IN_DATABASE / LOG` でスキーマ変更を反映しつつ誤削除防止
+- Athena 結果用プレフィックス `athena-results/` は7日でライフサイクル削除
+
+デプロイ後は以下のような分析が可能になります (`docs/analysis/` で順次公開予定):
+
+```sql
+-- 媒体別の記事流量 TOP10 (どの媒体が今ホットか)
+SELECT source, COUNT(*) AS articles
+FROM google_news_rss
+WHERE year='2026' AND month='05'
+GROUP BY source
+ORDER BY articles DESC
+LIMIT 10;
+```
+
 ## 🗺 ロードマップ
 
 - [x] **Phase B-1**: Playwright版 → RSS版への移行 (本日完了)
 - [x] **Phase B-2**: ADR ドキュメント化、README 全面改訂 (本日完了)
-- [ ] **Phase B-3**: Athena テーブル定義 + Glue Crawler を SAM に追加
+- [x] **Phase B-3**: Athena テーブル定義 + Glue Crawler を SAM に追加
 - [ ] **Phase B-4**: JSON → Parquet 変換 Lambda (S3 イベント駆動) を追加し、スキャンコストを更に削減
 - [ ] **Phase B-5**: QuickSight ダッシュボードで媒体別記事流量を可視化
 - [ ] **Phase B-6**: GitHub Actions による CI (pytest + sam validate) の自動化
