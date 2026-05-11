@@ -300,7 +300,7 @@ LIMIT 10;
 - [x] **Phase B-3**: Athena テーブル定義 + Glue Crawler を SAM に追加
 - [ ] **Phase B-4**: JSON → Parquet 変換 Lambda (S3 イベント駆動) を追加し、スキャンコストを更に削減
 - [ ] **Phase B-5**: QuickSight ダッシュボードで媒体別記事流量を可視化
-- [ ] **Phase B-6**: GitHub Actions による CI (pytest + sam validate) の自動化
+- [x] **Phase B-6**: GitHub Actions による CI (pytest + sam validate) の自動化
 - [ ] **Phase B-7**: Step Functions でジョブ依存関係をオーケストレーション化
 
 ---
