@@ -3,7 +3,7 @@
 > **AWS Lambda + EventBridge + S3** で構築した、1時間ごとに自動稼働するニュース記事収集パイプライン。
 > 初期実装の **Playwright (Container Image) → 公式 RSS (ZIP)** への移行を経て、**実行コスト99.2%削減・データ品質∞倍化** を達成したデータエンジニアリング・ポートフォリオです。
 
-[![Tests](https://img.shields.io/badge/tests-24%20passed-brightgreen)]() [![Coverage](https://img.shields.io/badge/coverage-99%25-brightgreen)]() [![Python](https://img.shields.io/badge/python-3.12-blue)]() [![AWS](https://img.shields.io/badge/AWS-Lambda%20%7C%20S3%20%7C%20EventBridge-orange)]() [![License](https://img.shields.io/badge/license-MIT-lightgrey)]()
+[![Tests](https://github.com/kou-sato-ds/serverless-scraping-data-pipeline/actions/workflows/tests.yml/badge.svg)](https://github.com/kou-sato-ds/serverless-scraping-data-pipeline/actions/workflows/tests.yml) [![SAM Validate](https://github.com/kou-sato-ds/serverless-scraping-data-pipeline/actions/workflows/sam-validate.yml/badge.svg)](https://github.com/kou-sato-ds/serverless-scraping-data-pipeline/actions/workflows/sam-validate.yml) [![Coverage](https://img.shields.io/badge/coverage-99%25-brightgreen)]() [![Python](https://img.shields.io/badge/python-3.12-blue)]() [![AWS](https://img.shields.io/badge/AWS-Lambda%20%7C%20S3%20%7C%20EventBridge-orange)]() [![License](https://img.shields.io/badge/license-MIT-lightgrey)]()
 
 ---
 

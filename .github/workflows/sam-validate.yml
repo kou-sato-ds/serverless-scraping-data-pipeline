@@ -1,0 +1,37 @@
+name: SAM Validate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'template.yaml'
+      - '.github/workflows/sam-validate.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'template.yaml'
+
+jobs:
+  validate:
+    name: sam validate --lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Setup AWS SAM CLI
+        uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: Validate SAM template (cfn-lint via sam)
+        env:
+          AWS_DEFAULT_REGION: ap-northeast-1
+          SAM_CLI_TELEMETRY: 0
+        run: sam validate --lint
