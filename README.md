@@ -297,7 +297,7 @@ LIMIT 10;
 
 - [x] **Phase B-1**: Playwright版 → RSS版への移行 (本日完了)
 - [x] **Phase B-2**: ADR ドキュメント化、README 全面改訂 (本日完了)
-- [x] **Phase B-3**: Athena テーブル定義 + Glue Crawler を SAM に追加
+- [x] **Phase B-3**: Athena テーブル定義 + Glue Crawler を SAM に追加 (IaC設計完了、デプロイは次週末)
 - [ ] **Phase B-4**: JSON → Parquet 変換 Lambda (S3 イベント駆動) を追加し、スキャンコストを更に削減
 - [ ] **Phase B-5**: QuickSight ダッシュボードで媒体別記事流量を可視化
 - [x] **Phase B-6**: GitHub Actions による CI (pytest + sam validate) の自動化
