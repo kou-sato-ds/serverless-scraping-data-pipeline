@@ -297,13 +297,24 @@ LIMIT 10;
 
 - [x] **Phase B-1**: Playwright版 → RSS版への移行 (本日完了)
 - [x] **Phase B-2**: ADR ドキュメント化、README 全面改訂 (本日完了)
-- [x] **Phase B-3**: Athena テーブル定義 + Glue Crawler を SAM に追加 (IaC設計完了、デプロイは次週末)
+- [x] **Phase B-3**: Athena テーブル定義 + Glue Crawler を SAM に追加 (IaC設計完了、[デプロイ手順](docs/deployment-runbook.md))
 - [ ] **Phase B-4**: JSON → Parquet 変換 Lambda (S3 イベント駆動) を追加し、スキャンコストを更に削減
 - [ ] **Phase B-5**: QuickSight ダッシュボードで媒体別記事流量を可視化
 - [x] **Phase B-6**: GitHub Actions による CI (pytest + sam validate) の自動化
 - [ ] **Phase B-7**: Step Functions でジョブ依存関係をオーケストレーション化
 
 ---
+
+## 🔜 次回更新予定 (Phase B-3 デプロイ)
+
+| 予定日 | 内容 |
+|---|---|
+| **2026-05-16 (土)** | Athena 分析層を本番デプロイ ([runbook](docs/deployment-runbook.md)) |
+| **2026-05-16 (土)** | [`docs/analysis/`](docs/analysis/) の SQL 3本を Athena で実行 |
+| **2026-05-17 (日)** | 各 analysis ファイルに実測結果スクリーンショット + 所見を追記 |
+| **以降** | Phase B-4: JSON → Parquet 変換 Lambda |
+
+進行状況は [ロードマップ](#-ロードマップ) を参照。
 
 ## 📖 ドキュメント
 
