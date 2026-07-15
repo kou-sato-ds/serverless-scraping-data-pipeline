@@ -4,6 +4,8 @@ Description: >
   Serverless News RSS Collector + Athena Analytics Layer.
   Lambda fetches Google News RSS hourly to S3 (Hive-partitioned),
   Glue Crawler discovers partitions, Athena enables SQL analytics.
+  v2.1 (PR #2): handler now propagates exceptions; EventInvokeConfig +
+  SQS DLQ capture failed invocations for re-drive (see docs/ADR-003).
 
 # =====================================================================
 # Parameters
@@ -66,7 +68,23 @@ Resources:
             ExpirationInDays: 7
 
   # -------------------------------------------------------------------
+  # SQS Dead Letter Queue (PR #2 / ADR-003)
+  #   - Lambda の非同期呼び出しが2回のリトライ後もなお失敗した場合の受け皿
+  #   - 14日 (SQS上限) 保持: 金曜夜の障害でも月曜営業時間内の re-drive に間に合う
+  #   - SSE有効: バケットと同様、保存データの暗号化を統一
+  # -------------------------------------------------------------------
+  RssCollectorDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ProjectName}-dlq"
+      MessageRetentionPeriod: 1209600  # 14 days (SQS の最大値)
+      SqsManagedSseEnabled: true
+
+  # -------------------------------------------------------------------
   # Lambda Function (RSS Collector)
+  #   v2.1: handler が例外を re-raise するようになったため、
+  #   EventInvokeConfig で自動リトライ + OnFailure Destination を有効化。
+  #   リトライによる再実行は ADR-002 の冪等キー設計により無害 (PR #1 依存)。
   # -------------------------------------------------------------------
   RssCollectorFunction:
     Type: AWS::Serverless::Function
@@ -87,6 +105,21 @@ Resources:
               Action:
                 - s3:PutObject
               Resource: !Sub "${NewsBucket.Arn}/${S3DataPrefix}/*"
+        # 🛡️ 最小権限: DLQ本体への SendMessage のみ付与 (Receive/Delete等は不要)
+        #    Lambda destinations は実行ロール自身がキューへ書き込む仕組みのため必須。
+        - Statement:
+            - Sid: AllowSendToDLQOnly
+              Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource: !GetAtt RssCollectorDLQ.Arn
+      EventInvokeConfig:
+        MaximumRetryAttempts: 2        # 👉 初回+2回 = 計3回試行 (一過性障害の自己回復)
+        MaximumEventAgeInSeconds: 3600 # 👉 1時間超のイベントは次回スケジュールに委ね再処理しない
+        DestinationConfig:
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt RssCollectorDLQ.Arn
       Events:
         HourlySchedule:
           Type: Schedule
@@ -205,6 +238,11 @@ Outputs:
     Value: !GetAtt RssCollectorFunction.Arn
   FunctionName:
     Value: !Ref RssCollectorFunction
+  DLQUrl:
+    Description: SQS DLQ receiving failed async invocations (see ADR-003 for re-drive procedure)
+    Value: !Ref RssCollectorDLQ
+  DLQArn:
+    Value: !GetAtt RssCollectorDLQ.Arn
   GlueDatabaseName:
     Description: Glue database name (use in Athena)
     Value: !Ref NewsGlueDatabase
