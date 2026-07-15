@@ -1,5 +1,5 @@
 """
-Google News RSS Collector (Lambda Function) — v2.0 / Content-Addressable Storage
+Google News RSS Collector (Lambda Function) — v2.1 / Error Propagation + DLQ
 
 データパイプライン:
     1. 収集: Google News 公式 RSS フィード (XML) を取得
@@ -7,23 +7,27 @@ Google News RSS Collector (Lambda Function) — v2.0 / Content-Addressable Stora
     3. 蓄積: 記事ごとに Content-Addressable な S3 キーで JSON 保存
              (year=YYYY/month=MM/day=DD/hour=HH/<sha256:16>.json)
 
-設計上の特徴 (v2.0 で導入された冪等性保証):
-    - **記事粒度の冪等性**: S3 キーは `link + published` の SHA-256 から決定的に
-      生成される。同じ記事が複数回取得されても、S3 上では常に同一キーに
-      書き込まれ、Athena クエリ結果が膨らまない (Content-Addressable Storage).
-    - **パーティションは published_at ベース**: Lambda 実行時刻ではなく
-      記事の公開時刻でパーティションを切る。Late-arriving data や時刻またぎの
-      実行でも、データの論理的所属が一意に決まる。
-    - **fetched_at は監査用メタデータとして payload に保持**: 物理的な取得時刻も
-      失わない (audit trail).
-    - **schema_version を payload に含める**: 将来のスキーマ進化に備える.
+設計上の特徴:
+    - **記事粒度の冪等性 (v2.0 / ADR-002)**: S3 キーは `link + published` の
+      SHA-256 から決定的に生成される。リトライや再取得でも S3 の最終状態は
+      同一に収束する (Content-Addressable Storage).
+    - **例外の伝播 (v2.1 / ADR-003)**: handler は例外を握りつぶさない。
+      構造化 ERROR ログを 1 行出力した後に再送出することで、Lambda async
+      invocation の自動リトライ (最大2回) と OnFailure Destination (SQS DLQ)
+      を発動させる。リトライによる重複書き込みは ADR-002 の冪等キー設計で
+      構造的に無害化されている — これが PR #1 → PR #2 の順序の設計根拠.
+    - **fetched_at は EventBridge event['time'] 由来**: リトライ間で不変.
 
-v1.0 からの破壊的変更:
-    - S3 オブジェクトのスキーマが `{"count": N, "articles": [...]}` から
-      `{"schema_version": "2.0", "article": {...}}` に変更 (1ファイル=1記事).
-    - `build_object_key()` のシグネチャ変更: 第1引数が `datetime` から `dict` に.
+v2.1 (PR #2) での変更:
+    - lambda_handler: 例外握りつぶし (`return 500`) を廃止し、構造化 ERROR
+      ログ出力後に raise する方式へ変更. 詳細は
+      docs/ADR-003-error-propagation-and-dlq.md を参照.
+    - print(json.dumps(...)) による構造化ログは PR #3 (Powertools Logger)
+      導入までの暫定橋渡し.
 
-設計判断の詳細は docs/ADR-002-content-addressable-keys.md を参照.
+設計判断の詳細:
+    - docs/ADR-002-content-addressable-keys.md (冪等キー設計)
+    - docs/ADR-003-error-propagation-and-dlq.md (エラー伝播と DLQ)
 """
 from __future__ import annotations
 
@@ -328,15 +332,16 @@ def lambda_handler(event, context):
     """
     EventBridge から1時間ごとに呼ばれるエントリポイント。
 
-    冪等性の動作:
+    冪等性の動作 (v2.0 / ADR-002):
         - 同じ EventBridge イベントが再配信されても、event['time'] は不変
         - 各記事の S3 キーは link + published から決定的に生成される
         - したがって、何度呼び出されても S3 の最終状態は同一に収束する
 
-    注意:
-        本 handler は v2.0 時点では例外を握りつぶさず、そのまま伝播させる
-        設計に未変更 (PR1 のスコープ外). PR2 で Lambda の retry / DLQ 機構を
-        有効化するため、structured exception handling を導入予定.
+    エラーハンドリング (v2.1 / ADR-003):
+        - 例外は構造化 ERROR ログ (JSON 1行) を出力した後、そのまま再送出する
+        - Lambda async invocation は「例外で終了した場合のみ」失敗と判定され、
+          自動リトライ (最大2回) と OnFailure Destination (SQS DLQ) が発動する
+        - リトライによる再実行は ADR-002 の冪等キー設計により無害
     """
     fetched_at = extract_event_time(event)
     print(
@@ -375,13 +380,23 @@ def lambda_handler(event, context):
         }
 
     except Exception as e:
-        # NOTE: 現状は v1.0 と同じく握りつぶし継続. PR2 で raise に変更予定.
-        # この時点で改修すると Lambda retry が発動してデータ重複になる
-        # リスクがあるため、PR1 では冪等性導入に専念する.
-        print(f"[ERROR] {type(e).__name__}: {e}")
-        return {
-            "statusCode": 500,
-            "body": json.dumps(
-                {"error": f"{type(e).__name__}: {e}"}, ensure_ascii=False
-            ),
-        }
+        # v2.1 (ADR-003): 例外は握りつぶさない。
+        # 構造化ログを 1 行出力してから再送出することで、
+        #   - CloudWatch Logs Insights で level / error_type による集計が可能になり
+        #   - Lambda の自動リトライ (最大2回) と SQS DLQ への送出が発動する。
+        # リトライ時の重複書き込みは ADR-002 の冪等キー設計で無害化済み。
+        # NOTE: print(json.dumps(...)) は PR #3 (Powertools Logger) までの暫定橋渡し。
+        print(
+            json.dumps(
+                {
+                    "level": "ERROR",
+                    "message": "RSS pipeline failed",
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "event_id": event.get("id") if isinstance(event, dict) else None,
+                    "fetched_at": fetched_at.isoformat(),
+                },
+                ensure_ascii=False,
+            )
+        )
+        raise
