@@ -1,11 +1,16 @@
 """
-Unit and integration tests for the RSS collector Lambda (v2.0).
+Unit and integration tests for the RSS collector Lambda (v2.1).
 
 v2.0 で追加されたテスト群:
     - TestComputeArticleHash: 記事ハッシュの決定性・衝突性
     - TestDerivePartitionDatetime: パーティション時刻の導出ロジック
     - TestExtractEventTime: EventBridge イベントからの時刻抽出
     - TestIdempotency: 同一入力での再実行が S3 上で重複を生まないこと (冪等性の本丸)
+
+v2.1 (PR #2) での変更:
+    - TestLambdaHandler: 例外が握りつぶされず伝播することを検証する形へ変更
+      (test_raises_on_exception). Lambda retry / DLQ 発動の前提条件.
+    - 構造化 ERROR ログの契約テストを追加 (test_error_log_is_structured_json).
 """
 from __future__ import annotations
 
@@ -372,7 +377,7 @@ class TestUploadArticles:
 
 
 # ================================================================
-# Idempotency (v2.0 の中核) — PR1 で達成したい品質の証明
+# Idempotency (v2.0 の中核) — PR1 で達成した品質の証明
 # ================================================================
 class TestIdempotency:
     """
@@ -453,7 +458,7 @@ class TestIdempotency:
 
 
 # ================================================================
-# lambda_handler
+# lambda_handler (v2.1 改修: 例外伝播 + 構造化 ERROR ログの契約)
 # ================================================================
 class TestLambdaHandler:
     def test_full_flow_returns_200(
@@ -480,13 +485,41 @@ class TestLambdaHandler:
         response = app.lambda_handler(fixed_event, None)
         assert response["statusCode"] == 204
 
-    def test_returns_500_on_exception(self, s3_environment, fixed_event, monkeypatch):
+    def test_raises_on_exception(self, s3_environment, fixed_event, monkeypatch):
+        """
+        v2.1 (ADR-003): 例外は握りつぶされず伝播すること。
+        これが Lambda 自動リトライ / SQS DLQ 発動の前提条件である。
+        """
         def boom(url):
             raise RuntimeError("Network down")
         monkeypatch.setattr("app.feedparser.parse", boom)
 
-        response = app.lambda_handler(fixed_event, None)
-        # NOTE: PR1 では handler の握りつぶし挙動を温存. PR2 で raise に変更.
-        assert response["statusCode"] == 500
-        body = json.loads(response["body"])
-        assert "Network down" in body["error"]
+        with pytest.raises(RuntimeError, match="Network down"):
+            app.lambda_handler(fixed_event, None)
+
+    def test_error_log_is_structured_json(
+        self, s3_environment, fixed_event, monkeypatch, capsys
+    ):
+        """
+        v2.1 (ADR-003): 例外発生時、raise の前に JSON 1行の構造化 ERROR ログが
+        出力されること。CloudWatch Logs Insights で level / error_type による
+        集計を可能にする観測性の契約 (PR #3 で Powertools Logger に置換予定).
+        """
+        def boom(url):
+            raise RuntimeError("Network down")
+        monkeypatch.setattr("app.feedparser.parse", boom)
+
+        with pytest.raises(RuntimeError):
+            app.lambda_handler(fixed_event, None)
+
+        captured = capsys.readouterr()
+        error_lines = [
+            line for line in captured.out.strip().splitlines()
+            if '"level": "ERROR"' in line
+        ]
+        assert error_lines, "structured ERROR log line was not emitted before raise"
+
+        payload = json.loads(error_lines[-1])
+        assert payload["error_type"] == "RuntimeError"
+        assert payload["error_message"] == "Network down"
+        assert payload["event_id"] == fixed_event["id"]
