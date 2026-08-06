@@ -486,10 +486,7 @@ class TestLambdaHandler:
         assert response["statusCode"] == 204
 
     def test_raises_on_exception(self, s3_environment, fixed_event, monkeypatch):
-        """
-        v2.1 (ADR-003): 例外は握りつぶされず伝播すること。
-        これが Lambda 自動リトライ / SQS DLQ 発動の前提条件である。
-        """
+        """ADR-003: 例外は握りつぶされず伝播すること (retry/DLQ の前提)。"""
         def boom(url):
             raise RuntimeError("Network down")
         monkeypatch.setattr("app.feedparser.parse", boom)
@@ -498,28 +495,41 @@ class TestLambdaHandler:
             app.lambda_handler(fixed_event, None)
 
     def test_error_log_is_structured_json(
-        self, s3_environment, fixed_event, monkeypatch, capsys
+        self, s3_environment, fixed_event, monkeypatch
     ):
         """
-        v2.1 (ADR-003): 例外発生時、raise の前に JSON 1行の構造化 ERROR ログが
-        出力されること。CloudWatch Logs Insights で level / error_type による
-        集計を可能にする観測性の契約 (PR #3 で Powertools Logger に置換予定).
+        ADR-004: Powertools Logger が ERROR レコードを出してから再送出すること。
+
+        NOTE: capsys/capfd では捕捉できない。Powertools は import 時に
+        StreamHandler を生成し propagate=False で動くため、
+        ロガーへ直接ハンドラを付けてレコードを掴むのが最も確実。
         """
+        import logging
+
         def boom(url):
             raise RuntimeError("Network down")
         monkeypatch.setattr("app.feedparser.parse", boom)
 
-        with pytest.raises(RuntimeError):
-            app.lambda_handler(fixed_event, None)
+        captured_records = []
 
-        captured = capsys.readouterr()
-        error_lines = [
-            line for line in captured.out.strip().splitlines()
-            if '"level": "ERROR"' in line
-        ]
-        assert error_lines, "structured ERROR log line was not emitted before raise"
+        class _CaptureHandler(logging.Handler):
+            def emit(self, record):
+                captured_records.append(record)
 
-        payload = json.loads(error_lines[-1])
-        assert payload["error_type"] == "RuntimeError"
-        assert payload["error_message"] == "Network down"
-        assert payload["event_id"] == fixed_event["id"]
+        handler = _CaptureHandler()
+        app.logger.addHandler(handler)
+        try:
+            with pytest.raises(RuntimeError):
+                app.lambda_handler(fixed_event, None)
+        finally:
+            app.logger.removeHandler(handler)
+
+        errors = [r for r in captured_records if r.levelname == "ERROR"]
+        assert errors, "Powertools Logger must emit an ERROR record before re-raising"
+
+        record = errors[-1]
+        assert getattr(record, "error_type", None) == "RuntimeError"
+        assert getattr(record, "error_message", None) == "Network down"
+        assert getattr(record, "event_id", None) == fixed_event["id"]
+        assert record.exc_info is not None, \
+            "logger.exception() must attach the stack trace"
