@@ -1,20 +1,19 @@
 """
-Google News RSS Collector (Lambda Function) — v3.0 / Powertools Structured Logging
+Google News RSS Collector (Lambda Function) — v3.1 / Correlation ID
 
 設計上の特徴:
-    - **記事粒度の冪等性 (v2.0 / ADR-002)**: S3 キーは `link + published` の
-      SHA-256 から決定的に生成される。
-    - **例外の伝播 (v2.1 / ADR-003)**: handler は例外を握りつぶさず再送出し、
-      Lambda の自動リトライと SQS DLQ を発動させる。
-    - **構造化ログ (v3.0 / ADR-004)**: `print(json.dumps(...))` による手書きの
-      構造化を廃し、Lambda Powertools Logger へ移行。ADR-003 が
-      「PR#3 で置換」と刻んだ暫定実装の解消にあたる。
+    - **記事粒度の冪等性 (v2.0 / ADR-002)**
+    - **例外の伝播 (v2.1 / ADR-003)**
+    - **構造化ログ (v3.0 / ADR-004)**
+    - **相関ID (v3.1 / ADR-005)**: `@logger.inject_lambda_context` により
+      全ログレコードへ correlation_id を自動付与する。相関IDには EventBridge の
+      `event['id']` を採用した——この値はリトライ時も不変であるため、
+      **同一イベントの3回の試行が同じ相関IDで束ねられる**。
+      ADR-003 が有効化したリトライを、Logs Insights 上で追跡可能にする。
 
-v3.0 (PR #3) での変更:
-    - aws-lambda-powertools を依存に追加
-    - print(json.dumps(...)) / print(f"[INFO] ...") を Logger へ置換
-    - NOTE: @logger.inject_lambda_context は本PRのスコープ外 (後続PRで対応)。
-      デコレータは context オブジェクトを要求するが、現行テストは None を渡すため。
+v3.1 (PR #4) での変更:
+    - @logger.inject_lambda_context(correlation_id_path=EVENT_BRIDGE) を追加
+    - テストは context オブジェクトを渡すよう変更 (ADR-004 が予告した通り)
 """
 from __future__ import annotations
 
@@ -29,10 +28,8 @@ from typing import Optional
 import boto3
 import feedparser
 from aws_lambda_powertools import Logger
+from aws_lambda_powertools.logging import correlation_paths
 
-# ----------------------------------------------------------------
-# 構造化ロガー (ADR-004)
-# ----------------------------------------------------------------
 logger = Logger(service="rss-collector")
 
 S3_BUCKET = os.environ.get("S3_BUCKET")
@@ -179,8 +176,7 @@ def upload_articles(articles: list[dict], fetched_at: datetime) -> list[str]:
         payload = build_payload(article, fetched_at, article_hash)
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
 
-        # NOTE: PutObject は冪等。キーがコンテンツから決定的に導出されるため、
-        # 重複書き込みでも保存内容は同じになる (ADR-002)。
+        # NOTE: PutObject は冪等 (ADR-002)。
         s3.put_object(
             Bucket=S3_BUCKET,
             Key=object_key,
@@ -206,13 +202,14 @@ def extract_event_time(event: dict) -> datetime:
     return datetime.now(timezone.utc)
 
 
+@logger.inject_lambda_context(correlation_id_path=correlation_paths.EVENT_BRIDGE)
 def lambda_handler(event, context):
     """
     EventBridge から1時間ごとに呼ばれるエントリポイント。
 
-    冪等性 (ADR-002): 同じイベントが再配信されても S3 の最終状態は同一に収束する。
-    エラー伝播 (ADR-003): 例外は構造化 ERROR ログの後、そのまま再送出する。
-    構造化ログ (ADR-004): 書式は Powertools Logger が保証し、手書きしない。
+    相関ID (ADR-005): EventBridge の `event['id']` を correlation_id として
+    全ログレコードへ自動付与する。この値はリトライ時も不変であるため、
+    ADR-003 が有効化した最大3回の試行を1つのIDで追跡できる。
     """
     fetched_at = extract_event_time(event)
     logger.info("RSS fetch start", extra={
@@ -249,8 +246,6 @@ def lambda_handler(event, context):
         return {"statusCode": 200, "body": json.dumps(result, ensure_ascii=False)}
 
     except Exception as e:
-        # ADR-004: 書式を手書きせず Logger に委ねる。
-        # logger.exception() は severity=ERROR とスタックトレースを自動付与する。
         logger.exception("RSS pipeline failed", extra={
             "error_type": type(e).__name__,
             "error_message": str(e),
