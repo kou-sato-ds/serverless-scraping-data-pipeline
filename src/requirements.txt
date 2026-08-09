@@ -1,2 +1,3 @@
 feedparser
 aws-lambda-powertools>=3.0.0
+aws-lambda-powertools
