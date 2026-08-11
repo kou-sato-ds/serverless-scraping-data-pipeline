@@ -74,7 +74,7 @@ def fixed_event():
     }
 
 @pytest.fixture
-def  None():
+def lambda_context():
     """
     Lambda context のスタブ (ADR-005)。
 
@@ -406,13 +406,13 @@ class TestIdempotency:
     """
 
     def test_same_event_produces_same_keys(
-        self, s3_environment, patched_feedparser, fixed_event,  None, monkeypatch
+        self, s3_environment, patched_feedparser, fixed_event, lambda_context, monkeypatch
     ):
         """同じイベントを2回実行 → S3 オブジェクト数が変わらないこと。"""
         monkeypatch.setattr("app.SKIP_UPLOAD", False)
 
         # 1回目の実行
-        response_1 = app.lambda_handler(fixed_event,   None)
+        response_1 = app.lambda_handler(fixed_event, lambda_context)
         assert response_1["statusCode"] == 200
 
         objects_after_first = s3_environment.list_objects_v2(Bucket="test-bucket")
@@ -423,7 +423,7 @@ class TestIdempotency:
         assert first_count > 0  # 何らかが書かれた
 
         # 2回目の実行 (リトライ相当)
-        response_2 = app.lambda_handler(fixed_event,   None)
+        response_2 = app.lambda_handler(fixed_event, lambda_context)
         assert response_2["statusCode"] == 200
 
         objects_after_second = s3_environment.list_objects_v2(Bucket="test-bucket")
@@ -439,7 +439,7 @@ class TestIdempotency:
         )
 
     def test_different_event_times_same_partition_when_published_present(
-         self, s3_environment, patched_feedparser,  None, monkeypatch
+         self, s3_environment, patched_feedparser, lambda_context, monkeypatch
     ):
         """
         EventBridge の time が変わっても、記事の published_at が同じなら
@@ -450,7 +450,7 @@ class TestIdempotency:
         event_a = {"time": "2026-05-10T03:00:00Z"}
         event_b = {"time": "2026-05-11T03:00:00Z"}
 
-        app.lambda_handler(event_a,   None)
+        app.lambda_handler(event_a, lambda_context)
         keys_a = sorted(
             o["Key"]
             for o in s3_environment.list_objects_v2(Bucket="test-bucket").get(
@@ -462,7 +462,7 @@ class TestIdempotency:
         for k in keys_a:
             s3_environment.delete_object(Bucket="test-bucket", Key=k)
 
-        app.lambda_handler(event_b,   None)
+        app.lambda_handler(event_b, lambda_context)
         keys_b = sorted(
             o["Key"]
             for o in s3_environment.list_objects_v2(Bucket="test-bucket").get(
@@ -482,11 +482,11 @@ class TestIdempotency:
 # ================================================================
 class TestLambdaHandler:
     def test_full_flow_returns_200(
-        self, s3_environment, patched_feedparser, fixed_event,  None, monkeypatch
+        self, s3_environment, patched_feedparser, fixed_event, lambda_context, monkeypatch
     ):
         monkeypatch.setattr("app.SKIP_UPLOAD", False)
 
-        response = app.lambda_handler(fixed_event,   None)
+        response = app.lambda_handler(fixed_event, lambda_context)
 
         assert response["statusCode"] == 200
         body = json.loads(response["body"])
@@ -496,26 +496,26 @@ class TestLambdaHandler:
         assert "sample_key" in body
         assert body["fetched_at"] == "2026-05-11T03:00:00+00:00"
 
-    def test_returns_204_when_no_articles(self, s3_environment, fixed_event,  None, monkeypatch):
+    def test_returns_204_when_no_articles(self, s3_environment, fixed_event, lambda_context, monkeypatch):
         class EmptyFeed:
             entries = []
             bozo = 0
         monkeypatch.setattr("app.feedparser.parse", lambda url: EmptyFeed())
 
-        response = app.lambda_handler(fixed_event,   None)
+        response = app.lambda_handler(fixed_event, lambda_context)
         assert response["statusCode"] == 204
 
-    def test_raises_on_exception(self, s3_environment, fixed_event,  None, monkeypatch):
+    def test_raises_on_exception(self, s3_environment, fixed_event, lambda_context, monkeypatch):
         """ADR-003: 例外は握りつぶされず伝播すること (retry/DLQ の前提)。"""
         def boom(url):
             raise RuntimeError("Network down")
         monkeypatch.setattr("app.feedparser.parse", boom)
 
         with pytest.raises(RuntimeError, match="Network down"):
-            app.lambda_handler(fixed_event,   None)
+            app.lambda_handler(fixed_event, lambda_context)
 
     def test_error_log_is_structured_json(
-        self, s3_environment, fixed_event,  None, monkeypatch
+        self, s3_environment, fixed_event, lambda_context, monkeypatch
     ):
         """
         ADR-004: Powertools Logger が ERROR レコードを出してから再送出すること。
@@ -540,7 +540,7 @@ class TestLambdaHandler:
         app.logger.addHandler(handler)
         try:
             with pytest.raises(RuntimeError):
-                app.lambda_handler(fixed_event,   None)
+                app.lambda_handler(fixed_event, lambda_context)
         finally:
             app.logger.removeHandler(handler)
 
@@ -554,7 +554,7 @@ class TestLambdaHandler:
 
     
     def test_correlation_id_is_the_eventbridge_event_id(
-        self, s3_environment, patched_feedparser, fixed_event,  None, monkeypatch
+        self, s3_environment, patched_feedparser, fixed_event, lambda_context, monkeypatch
     ):
         """
         ADR-005: correlation_id must be the EventBridge event id.
@@ -564,7 +564,7 @@ class TestLambdaHandler:
         """
         monkeypatch.setattr("app.SKIP_UPLOAD", False)
 
-        app.lambda_handler(fixed_event,  None)
+        app.lambda_handler(fixed_event, lambda_context)
 
         assert app.logger.get_correlation_id() == fixed_event["id"], (
             "correlation_id must come from the EventBridge event id, "
