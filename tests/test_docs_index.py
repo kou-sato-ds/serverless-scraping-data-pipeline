@@ -38,7 +38,6 @@ ADR_CONCERNS = {
     6: "postmortem",       # broken main incident
     7: "testing",          # collection guard
     8: "documentation",    # ADR index
-    8: "documentation",    # ADR index
 }
 
 

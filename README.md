@@ -14,7 +14,6 @@
 | ADR-006 | postmortem | 構文エラーが main に到達した経緯 | テストが 0 件でも気づけない |
 | ADR-007 | testing | 収集ガードの実装 | ADR-006 の再発防止策③ |
 | ADR-008 | documentation | ADR索引をREADMEに置き整合をテストで守る | 書いたADRが辿れない |
-| ADR-008 | documentation | ADR索引をREADMEに置き整合をテストで守る | 書いたADRが辿れない |
 
 **読む順序の推奨**: ADR-002 → ADR-003 → ADR-006
 
