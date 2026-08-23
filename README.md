@@ -1,4 +1,30 @@
 # Serverless News Data Pipeline
+## この設計記録の読み方
+
+本リポジトリの設計判断は全て ADR (Architecture Decision Record) として記録されています。
+各 ADR は**前の ADR が残した課題を解決する**形で連鎖しています。
+
+| ADR | 関心 | 内容 | 解決した課題 |
+|---|---|---|---|
+| ADR-001 | migration | Playwright → RSS への移行 | 99.2% のコスト削減 |
+| ADR-002 | idempotency | Content-Addressable な S3 キー | リトライによる重複書き込み |
+| ADR-003 | fault_tolerance | 例外伝播 + SQS DLQ | サイレント失敗（500 を返して成功扱い） |
+| ADR-004 | observability | Powertools 構造化ログ | ADR-003 が残した「print は暫定」 |
+| ADR-005 | observability | EventBridge event id を相関ID | ADR-004 が保留した相関ID |
+| ADR-006 | postmortem | 構文エラーが main に到達した経緯 | テストが 0 件でも気づけない |
+| ADR-007 | testing | 収集ガードの実装 | ADR-006 の再発防止策③ |
+| ADR-008 | documentation | ADR索引をREADMEに置き整合をテストで守る | 書いたADRが辿れない |
+| ADR-008 | documentation | ADR索引をREADMEに置き整合をテストで守る | 書いたADRが辿れない |
+
+**読む順序の推奨**: ADR-002 → ADR-003 → ADR-006
+
+- **ADR-002/003** は「リトライを安全にするのは冪等性である」という順序設計を示します
+- **ADR-006** は実際に起きた障害のポストモーテムであり、
+  「常に赤いチェックは赤信号の意味を破壊する」という教訓を記録しています
+
+> **姉妹プロジェクト**: [Mastering-Data-Engineering-Foundations](https://github.com/kou-sato-ds/Mastering-Data-Engineering-Foundations)
+> — GCP (Dataflow / BigQuery) で**同一の設計思想を別クラウドで実装**した学習ログ。
+> 冪等性・障害耐性・観測性・テスト戦略の各領域が本リポジトリと対応しています。
 
 > **AWS Lambda + EventBridge + S3** で構築した、1時間ごとに自動稼働するニュース記事収集パイプライン。
 > 初期実装の **Playwright (Container Image) → 公式 RSS (ZIP)** への移行を経て、**実行コスト99.2%削減・データ品質∞倍化** を達成したデータエンジニアリング・ポートフォリオです。
