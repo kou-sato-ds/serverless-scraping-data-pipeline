@@ -27,6 +27,7 @@ from typing import Optional
 
 import boto3
 import feedparser
+import quality
 from aws_lambda_powertools import Logger
 from aws_lambda_powertools.logging import correlation_paths
 
@@ -221,6 +222,15 @@ def lambda_handler(event, context):
     try:
         articles = fetch_articles()
         logger.info("articles parsed", extra={"count": len(articles)})
+        # ADR-010: 品質チェックは処理を止めず、記録して通す
+        report = quality.check_feed_quality(articles)
+        issues = quality.summarise_quality_issues(report)
+        if issues:
+            logger.warning("feed quality degraded",
+                           extra=quality.build_quality_log_fields(report, issues))
+        else:
+            logger.info("feed quality ok",
+                        extra=quality.build_quality_log_fields(report, issues))
 
         if not articles:
             return {
