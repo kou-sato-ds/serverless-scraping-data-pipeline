@@ -40,6 +40,7 @@ ADR_CONCERNS = {
     8: "documentation",    # ADR index
     9: "documentation",    # interview narrative
     10: "data_quality",    # quality checks beyond structural validation
+    11: "documentation",   # readme structure
 }
 
 
