@@ -41,6 +41,7 @@ ADR_CONCERNS = {
     9: "documentation",    # interview narrative
     10: "data_quality",    # quality checks beyond structural validation
     11: "documentation",   # readme structure
+    12: "schema_evolution",   # schema compatibility
 }
 
 
