@@ -43,7 +43,8 @@ ADR_CONCERNS = {
     11: "documentation",   # readme structure
     12: "schema_evolution",   # schema compatibility
     13: "backfill",
-    14: "incremental",   # watermark stored in S3   # replay failed hourly slots
+    14: "incremental",   # watermark stored in S3   # replay failed hourly slots
+    15: "timezone",   # JST day spans two UTC partitions
 }
 
 
