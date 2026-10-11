@@ -45,6 +45,7 @@ ADR_CONCERNS = {
     13: "backfill",
     14: "incremental",   # watermark stored in S3   # replay failed hourly slots
     15: "timezone",   # JST day spans two UTC partitions
+    16: "data_quality",   # every fetched article is accounted for
 }
 
 
