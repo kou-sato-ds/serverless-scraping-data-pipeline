@@ -47,6 +47,7 @@ ADR_CONCERNS = {
     15: "timezone",   # JST day spans two UTC partitions
     16: "data_quality",   # every fetched article is accounted for
     17: "fault_tolerance",   # retries bounded by Lambda remaining time
+    18: "testing",   # count modules not used by app.py
 }
 
 
