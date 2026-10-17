@@ -22,7 +22,6 @@ KNOWN_UNWIRED = {
     "incremental": "ADR-014",
     "jst_partitions": "ADR-015",
     "run_reconciliation": "ADR-016",
-    "fetch_retry": "ADR-017",
 }
 
 

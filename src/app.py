@@ -24,9 +24,11 @@ import re
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Optional
+from urllib.error import URLError
 
 import boto3
 import feedparser
+import fetch_retry
 import quality
 from aws_lambda_powertools import Logger
 from aws_lambda_powertools.logging import correlation_paths
@@ -83,9 +85,33 @@ def extract_source(entry) -> Optional[str]:
     return cleanse_text(title) if title else None
 
 
+def raise_if_transient(feed: object) -> None:
+    """
+    feedparser が飲み込んだ「一時的な通信の失敗」を例外に戻す (ADR-017)。
+
+    feedparser.parse() は通信に失敗しても例外を投げず、bozo に入れて
+    空の結果を返す。このままでは再試行が一度も働かず、通信障害が
+    「その1時間はニュースが無かった」(204) として記録されてしまう。
+
+    - HTTP 429 / 5xx                    → TransientFetchError (status 付き)
+    - 接続失敗・タイムアウトで記事が0件 → TransientFetchError
+    - XML の軽い崩れ (記事は取れている) → 例外にしない。従来通り警告のみ
+
+    記事が取れているのに再試行すれば、毎時の小さな崩れで Lambda の時間を食う。
+    """
+    status = getattr(feed, "status", None)
+    if status in fetch_retry.RETRYABLE_STATUS:
+        raise fetch_retry.TransientFetchError(f"RSS returned HTTP {status}", status=status)
+    error = getattr(feed, "bozo_exception", None)
+    if (getattr(feed, "bozo", False) and not getattr(feed, "entries", None)
+            and isinstance(error, (URLError, TimeoutError, ConnectionError))):
+        raise fetch_retry.TransientFetchError(f"RSS fetch failed: {error!r}") from error
+
+
 def fetch_articles() -> list[dict]:
     """Google News RSS をパースして記事リストを返す。"""
     feed = feedparser.parse(RSS_URL)
+    raise_if_transient(feed)
 
     if feed.bozo:
         logger.warning("feedparser reported a parse warning",
@@ -220,8 +246,11 @@ def lambda_handler(event, context):
     })
 
     try:
-        articles = fetch_articles()
-        logger.info("articles parsed", extra={"count": len(articles)})
+        # ADR-017: 一時的な失敗は Lambda の残り時間の内側で再試行する。
+        # 残り時間を取れない呼び出し元では 0 とみなし、待たずに ADR-003 (DLQ) へ渡す。
+        remaining_ms = getattr(context, "get_remaining_time_in_millis", None) or (lambda: 0)
+        articles, attempts = fetch_retry.retry_fetch(fetch_articles, remaining_ms)
+        logger.info("articles parsed", extra={"count": len(articles), "fetch_attempts": attempts})
         # ADR-010: 品質チェックは処理を止めず、記録して通す
         report = quality.check_feed_quality(articles)
         issues = quality.summarise_quality_issues(report)
